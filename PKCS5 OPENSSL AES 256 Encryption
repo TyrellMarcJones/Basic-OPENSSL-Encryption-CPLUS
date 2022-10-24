@@ -1,0 +1,364 @@
+/*
+PKCS5 OPENSSL AES 256 Encryption
+Author: Tyrell Jones
+Date: 10/24/2022
+*/
+
+#include <iostream>
+#include "openssl/applink.c" 
+#include <openssl/evp.h>
+#include <openssl/conf.h>
+#include <openssl/err.h>
+#include <openssl/bio.h>
+#include <openssl/x509.h>
+#include <openssl/hmac.h>
+#include <fstream>
+#include <vector>
+#include <fstream>
+
+struct Base64DecTable
+{
+    signed char n[256];
+
+    Base64DecTable()
+    {
+        for (int i = 0; i < 256; ++i)
+        {
+            n[i] = -1;
+        }
+        for (unsigned char i = '0'; i <= '9'; ++i)
+        {
+            n[i] = 52 + i - '0';
+        }
+        for (unsigned char i = 'A'; i <= 'Z'; ++i)
+        {
+            n[i] = i - 'A';
+        }
+        for (unsigned char i = 'a'; i <= 'z'; ++i)
+        {
+            n[i] = 26 + i - 'a';
+        }
+        n['+'] = 62;
+        n['/'] = 63;
+    }
+    int operator [] (unsigned char i) const { return n[i]; }
+};
+
+size_t calcDecodeLength(char* b64input) {
+    size_t len = strlen(b64input), padding = 0;
+
+    if (b64input[len - 1] == '=' && b64input[len - 2] == '=') //last two chars are =
+        padding = 2;
+    else if (b64input[len - 1] == '=') //last char is =
+        padding = 1;
+
+    return (len * 3) / 4 - padding;
+}
+
+size_t base64DecodeToData(const std::string& sourceString, void* destinationPointer, size_t destinationSize)
+{
+    static const Base64DecTable b64table;
+    if (!destinationSize)
+    {
+        return 0;
+    }
+    const size_t length = sourceString.length();
+    int bc = 0, a = 0;
+    char* const startPointer = static_cast<char*>(destinationPointer);
+    char* pd = startPointer;
+    char* const pend = pd + destinationSize;
+    for (size_t i = 0; i < length; ++i)
+    {
+        const int n = b64table[sourceString[i]];
+        if (n == -1)
+        {
+            continue;
+        }
+        a |= (n & 63) << (18 - bc);
+        if ((bc += 6) > 18)
+        {
+            *pd = a >> 16;
+            if (++pd >= pend)
+            {
+                return pd - startPointer;
+            }
+            *pd = a >> 8;
+            if (++pd >= pend)
+            {
+                return pd - startPointer;
+            }
+            *pd = a;
+            if (++pd >= pend)
+            {
+                return pd - startPointer;
+            }
+            bc = a = 0;
+        }
+    }
+    if (bc >= 8)
+    {
+        *pd = a >> 16;
+        if (++pd >= pend)
+        {
+            return pd - startPointer;
+        }
+        if (bc >= 16)
+        {
+            *(pd++) = a >> 8;
+        }
+    }
+    return pd - startPointer;
+}
+
+static const std::string kBase64String =
+"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+"abcdefghijklmnopqrstuvwxyz"
+"0123456789+/";
+
+std::string base64Encode(unsigned char const* bytesToEncodeChar, unsigned int inLength)
+{
+    std::string returnString;
+    int i = 0;
+    int j = 0;
+    unsigned char characterArray3[3];
+    unsigned char charArray4[4];
+
+    while (inLength--)
+    {
+        characterArray3[i++] = *(bytesToEncodeChar++);
+        if (i == 3)
+        {
+            charArray4[0] = (characterArray3[0] & 0xfc) >> 2;
+            charArray4[1] = ((characterArray3[0] & 0x03) << 4) + ((characterArray3[1] & 0xf0) >> 4);
+            charArray4[2] = ((characterArray3[1] & 0x0f) << 2) + ((characterArray3[2] & 0xc0) >> 6);
+            charArray4[3] = characterArray3[2] & 0x3f;
+
+            for (i = 0; (i < 4); i++)
+            {
+                returnString += kBase64String[charArray4[i]];
+            }
+            i = 0;
+        }
+    }
+
+    if (i)
+    {
+        for (j = i; j < 3; j++)
+        {
+            characterArray3[j] = '\0';
+        }
+
+        charArray4[0] = (characterArray3[0] & 0xfc) >> 2;
+        charArray4[1] = ((characterArray3[0] & 0x03) << 4) + ((characterArray3[1] & 0xf0) >> 4);
+        charArray4[2] = ((characterArray3[1] & 0x0f) << 2) + ((characterArray3[2] & 0xc0) >> 6);
+        charArray4[3] = characterArray3[2] & 0x3f;
+
+        for (j = 0; (j < i + 1); j++)
+        {
+            returnString += kBase64String[charArray4[j]];
+        }
+
+        while ((i++ < 3))
+        {
+            returnString += '=';
+        }
+
+    }
+
+    return returnString;
+
+}
+
+void _handleErrors(void)
+{
+    ERR_print_errors_fp(stderr);
+    abort();
+}
+
+std::string readFile(std::string fileName) {
+	std::string mystring;
+	std::ifstream myfile(fileName);
+	if (myfile.is_open()) { // always check whether the file is open
+		myfile >> mystring; // pipe file's content into stream
+	}
+
+	return mystring;
+}
+
+void writeFile(std::string input, std::string fileName) {
+    std::ofstream out(fileName);
+    out << input;
+}
+
+int _encrypt(unsigned char* plainTextChar, int plainTextLength, unsigned char* keyChar, unsigned char* ivChar, unsigned char* cipherTextChar)
+{
+    EVP_CIPHER_CTX* cipherContext;
+    int length;
+    int cipherTextLength;
+
+    if (!(cipherContext = EVP_CIPHER_CTX_new()))
+    {
+        _handleErrors();
+    }
+    EVP_CIPHER_CTX_init(cipherContext);
+
+    if (1 != EVP_EncryptInit_ex(cipherContext, EVP_aes_256_cbc(), NULL, keyChar, ivChar))
+    {
+        _handleErrors();
+    }
+
+    if (1 != EVP_EncryptUpdate(cipherContext, cipherTextChar, &length, plainTextChar, plainTextLength))
+    {
+        _handleErrors();
+    }
+
+    cipherTextLength = length;
+
+    if (1 != EVP_EncryptFinal_ex(cipherContext, cipherTextChar + length, &length))
+    {
+        _handleErrors();
+    }
+
+    cipherTextLength += length;
+
+    EVP_CIPHER_CTX_cleanup(cipherContext);
+    EVP_CIPHER_CTX_free(cipherContext);
+
+    return cipherTextLength;
+}
+
+int _decrypt(unsigned char* cipherTextChar, int cipherTextLength, unsigned char* keyChar, unsigned char* ivChar, unsigned char* plainTextChar)
+{
+    EVP_CIPHER_CTX* cipherContext;
+    int length;
+    int plainTextLength;
+
+    if (!(cipherContext = EVP_CIPHER_CTX_new()))
+    {
+        _handleErrors();
+    }
+    EVP_CIPHER_CTX_init(cipherContext);
+
+    if (1 != EVP_DecryptInit_ex(cipherContext, EVP_aes_256_cbc(), NULL, keyChar, ivChar))
+    {
+        _handleErrors();
+    }
+
+    if (1 != EVP_DecryptUpdate(cipherContext, plainTextChar, &length, cipherTextChar, cipherTextLength))
+    {
+        _handleErrors();
+    }
+    plainTextLength = length;
+
+
+    if (1 != EVP_DecryptFinal_ex(cipherContext, plainTextChar + length, &length))
+    {
+        _handleErrors();
+    }
+    plainTextLength += length;
+
+    EVP_CIPHER_CTX_cleanup(cipherContext);
+    EVP_CIPHER_CTX_free(cipherContext);
+
+    return plainTextLength;
+}
+
+void encryptTest()
+{
+    //Can be changed to generate a key from the given password
+    int iterations = 1000;
+    size_t keyLength = 32; //256 bits
+    size_t i;
+    unsigned char* keyChar;
+    const char passwordChar[] = "abc123";
+    unsigned char saltChar[] = { 'q','j','6','-' };
+    keyChar = (unsigned char*)malloc(sizeof(unsigned char) * keyLength);
+    //Remove the following in production code:
+    std::cout << "password is " << passwordChar << std::endl;
+    std::cout << "salt is ";
+    for (i = 0; i < sizeof(saltChar); i++)
+    {
+        printf("%02x", saltChar[i]);
+    }
+    std::cout << std::endl;
+    if (PKCS5_PBKDF2_HMAC(passwordChar, strlen(passwordChar), saltChar, sizeof(saltChar), iterations, EVP_sha512(), keyLength, keyChar) != 0)
+    {
+        //Comment out for production code:
+        std::cout << "key is ";
+        for (i = 0; i < keyLength; i++)
+        {
+            printf("%02x", keyChar[i]);
+        }
+        std::cout << std::endl;
+    }
+    else
+    {
+        std::cout << "Failure to create key for password - PKCS5_PBKDF2_HMAC_SHA1" << std::endl;
+    }
+
+    unsigned char* ivChar = (unsigned char*)"73472859478267948"; //128 bit IV - use a secure generator
+    unsigned char* plainTextChar = (unsigned char*)"Test";
+
+    //Test buffer for cipher text. For this test we must make sure this is long enough for the
+    //encrypted data. It could end up being longer than plain text
+    unsigned char cipherTextChar[128];
+
+
+    int cipherTextLength;
+
+    //Init OpenSSL library
+    ERR_load_crypto_strings();
+    OpenSSL_add_all_algorithms();
+
+    //do the actual encryption
+    cipherTextLength = _encrypt(plainTextChar, strlen((const char*)plainTextChar), keyChar, ivChar, cipherTextChar);
+
+
+
+
+    //-----
+    //Optional example, this part can be skipped. Convert binary data to Base64 string
+    //If your storing the data as binary, then you can pass in binary data to be decrypted
+    std::string base64EncryptedString = base64Encode(cipherTextChar, cipherTextLength);
+    std::cout << "Cipher text is " << base64EncryptedString << std::endl;
+
+    //Now Write Encryption String to File
+    writeFile(
+        base64EncryptedString,
+        "enc.enc"
+    );
+    std::cout << std::endl;
+   
+
+    // ---------------------------------------------------------------------
+     std::string returnEnc = readFile("enc.enc");
+    //Now convert the Base64 string back to data
+    unsigned char encryptedDataChar[128];
+    unsigned char decryptedTextChar[128];
+    int decryptedTextLength;
+
+    const char* str = returnEnc.c_str();
+
+    base64DecodeToData(returnEnc, encryptedDataChar, strlen((char*)encryptedDataChar));
+    //-----
+
+    //do the actual decryption
+    decryptedTextLength = _decrypt(encryptedDataChar, calcDecodeLength((char*)str), keyChar, ivChar, decryptedTextChar);
+
+    //We know we passed in text at the beginning, so add a NULL terminator to be compliant with printable text
+    decryptedTextChar[decryptedTextLength] = '\0';
+
+    //wrap it into something useful or higher level...
+    std::string decryptedString((char*)decryptedTextChar, decryptedTextLength);
+    std::cout << "Decrypted text is:" << decryptedString << std::endl;
+
+    //cleanup
+    EVP_cleanup();
+    ERR_free_strings();
+    CONF_modules_free();
+    free(keyChar);
+}
+
+int main() {
+    encryptTest();
+}
